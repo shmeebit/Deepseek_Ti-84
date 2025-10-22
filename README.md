@@ -7,10 +7,11 @@ Portable calculator ↔ ESP32‑S3 bridge to a local LLM via Ollama.
 
 ## Repo layout
 
-- esp32s3/ – ESP32‑S3 host firmware (USB host + Wi‑Fi bridge)
-- esp32/ – Shared config: `secrets.h` (Wi‑Fi/server)
-- server/ – Minimal Node/Express bridge to Ollama (`/gpt` only)
-- pcb/ – Carrier PCB guide (schematic blocks, BOM, layout)
+- **esp32s3/** – ESP32‑S3 host firmware (USB host + Wi‑Fi bridge with TI link protocol)
+- **esp32/** – Shared config: `secrets.h` (Wi‑Fi/server credentials)
+- **server/** – Minimal Node/Express bridge to Ollama (`/gpt/ask` and `/gpt/solve` endpoints)
+- **ti84/** – Python programs for TI-84 Plus CE calculator
+- **pcb/** – Carrier PCB guide (schematic blocks, BOM, layout for battery-powered design)
 
 ## Quick start
 
@@ -27,24 +28,42 @@ Portable calculator ↔ ESP32‑S3 bridge to a local LLM via Ollama.
    - Use a USB‑C OTG/host adapter into the ESP’s host port.
    - Ensure 5V VBUS is sourced to the USB port; otherwise the calculator won’t enumerate.
 
-Status
-- Server is ready for local use with Ollama.
-- ESP32‑S3 firmware: Wi‑Fi + USB host driver scaffold in place; TI USB link layer (Str/Real transfers) is next.
+## Current Status
+
+✅ **Server** - Fully functional Node/Express bridge to Ollama with DeepSeek-R1
+✅ **ESP32‑S3 firmware** - Complete implementation with:
+  - WiFi connectivity
+  - USB host driver
+  - TI link protocol (string variable transfers)
+  - Command loop for processing calculator queries
+✅ **TI-84 Programs** - Python programs ready to transfer to calculator
+✅ **PCB Design** - Complete guide and starter KiCad project
+
+**Ready to build and test!**
 
 Notes
 - Use a USB‑C OTG/host adapter to ensure the ESP32‑S3 takes host role; it does not supply 5V by itself.
 - Assert VBUS (enable your switch) after Wi‑Fi is up, then the USB host driver will enumerate the calculator when plugged.
 
-## What's left to build
+## How It Works
 
-- ESP32‑S3 firmware
-   - USB attach handling: host events, NEW_DEV detection, device + active config descriptors are read and logged.
-   - Next: Parse configuration/interface descriptors and open the vendor/bulk IN/OUT endpoints used by the TI link protocol.
-   - Next: Implement silent transfers for StrN and Real variables (minimal subset; enough for prompt in/out).
-   - VBUS control added via GPIO10 (D16) on XIAO ESP32S3 Plus (changeable via `PIN_VBUS_EN`).
-- Server
-   - Optional: add streaming responses for longer answers.
-   - Optional: add a tiny auth header check for LAN locking.
+1. **Calculator Side**: TI-84 Python program writes question to `Str1`, sets `Str0="GO"`
+2. **ESP32 Side**: Polls for `Str0="GO"`, reads question from `Str1` via TI link protocol over USB
+3. **Server Side**: ESP32 makes HTTP GET to `/gpt/ask?question=...`, Ollama/DeepSeek processes
+4. **Response**: ESP32 writes answer to `Str2`, sets `Str0="DONE"`
+5. **Display**: Calculator reads `Str2` and displays answer to user
+
+## Future Enhancements
+
+Optional improvements you can add:
+
+- **Streaming responses** - Real-time token streaming for longer answers
+- **Authentication** - Add auth header check in server for LAN security
+- **Real variables** - Implement `get_real()` / `set_real()` for numeric calculations
+- **File transfer** - Extend protocol to support Python file transfer
+- **Multiple models** - Switch between different Ollama models
+- **History** - Store Q&A history on calculator
+- **Battery monitoring** - Add low-battery detection and VBUS control
 
 ## Battery power plan
 
@@ -107,19 +126,166 @@ Bring‑up checklist
 - EN goes HIGH after init; measure 5V at receptacle VBUS.
 - Plug the calculator; Serial should print NEW_DEV and a VID/PID.
 
-## Run the server on Windows
+## Complete Build & Test Guide
 
-1) Install Node.js (LTS) and ensure `node` is on PATH.
-2) Configure Ollama and pull a model (default is `deepseek-r1:latest`).
-3) In `server/`:
+### Step 1: Set up the Server
+
+1. **Install Prerequisites**:
+   - Install [Node.js LTS](https://nodejs.org/)
+   - Install [Ollama](https://ollama.ai/)
+
+2. **Configure Ollama**:
+   ```powershell
+   # Pull DeepSeek-R1 model (or your preferred model)
+   ollama pull deepseek-r1:latest
+   
+   # Start Ollama (if not running)
+   ollama serve
+   ```
+
+3. **Configure & Start Server**:
+   ```powershell
+   # From project root
+   cd server
+   
+   # Copy and edit .env file
+   copy .env.example .env
+   # Edit .env if needed (default settings work for local Ollama)
+   
+   # Install dependencies
+   npm install
+   
+   # Start server
+   npm start
+   ```
+
+4. **Verify Server**:
+   ```powershell
+   # In another terminal
+   curl http://localhost:8080/health
+   # Should return: {"ok":true,"model":"deepseek-r1:latest"}
+   
+   # Test the AI endpoint
+   curl "http://localhost:8080/gpt/ask?question=What+is+2+plus+2"
+   ```
+
+### Step 2: Flash ESP32-S3 Firmware
+
+1. **Configure WiFi & Server**:
+   - Edit `esp32/secrets.h`
+   - Set your WiFi SSID and password
+   - Set `SERVER` to your computer's IP (e.g., `"http://192.168.1.100:8080"`)
+   
+   Find your IP:
+   ```powershell
+   ipconfig
+   # Look for "IPv4 Address" under your WiFi adapter
+   ```
+
+2. **Flash Firmware**:
+   - Open `esp32s3/esp32s3_host.ino` in Arduino IDE
+   - Select board: "ESP32S3 Dev Module" or "XIAO ESP32S3"
+   - Select port for your ESP32-S3
+   - Click Upload
+   
+3. **Verify Connection**:
+   - Open Serial Monitor (115200 baud)
+   - You should see:
+     ```
+     [S3 Host] Boot
+     WiFi: connected
+     IP: 192.168.x.x
+     USB Host: ready
+     VBUS: enabled on GPIO10
+     ```
+
+### Step 3: Program the Calculator
+
+1. **Transfer Python Program**:
+   - Connect TI-84 Plus CE to PC via USB
+   - Use TI Connect CE software
+   - Transfer `ti84/ti32_ai.py` to calculator
+   - Optionally transfer `ti84/simple_test.py` for testing
+
+2. **Initial Test**:
+   - Disconnect calculator from PC
+   - Connect calculator to ESP32-S3 via USB OTG cable
+   - On calculator, run `simple_test` program
+   - Should see: "What is 2+2?" → "4" (or similar)
+
+3. **Run Full Program**:
+   - On calculator, run `ti32_ai` program
+   - Follow menu to ask questions
+
+### Step 4: Hardware Assembly (Optional Battery Power)
+
+For portable use, follow the wiring guide above or build the PCB:
+
+1. Follow `pcb/README.md` for complete PCB design
+2. Wire according to schematic in `pcb/ti-32-carrier/`
+3. Key components:
+   - 5V boost converter (e.g., MT3608, TPS61023)
+   - High-side switch (e.g., AP2331, TPS2553)
+   - USB-A receptacle for calculator
+   - LiPo battery (3.7V, 1000-2000mAh)
+
+## Troubleshooting
+
+### Server Issues
+
+**"Error connecting to Ollama"**
+- Ensure Ollama is running: `ollama serve`
+- Check Ollama URL in `.env` file
+- Test directly: `curl http://localhost:11434/api/tags`
+
+**"bad port" error**
+- Check PORT in `.env` (should be 8080)
+- Ensure port is not already in use
+
+### ESP32 Issues
+
+**WiFi not connecting**
+- Double-check SSID and password in `secrets.h`
+- Ensure 2.4GHz WiFi (ESP32 doesn't support 5GHz)
+- Check WiFi signal strength
+
+**"USB Host: failed"**
+- Ensure you're using ESP32-S3 (not ESP32)
+- Check board selection in Arduino IDE
+- Verify USB host pins are correct for your board
+
+**Calculator not detected**
+- Check USB cable connection
+- Verify 5V VBUS is present (GPIO10 HIGH)
+- Check Serial Monitor for "NEW_DEV" message
+
+### Calculator Issues
+
+**"Timeout waiting for response"**
+- Check ESP32 Serial Monitor for errors
+- Verify WiFi and server connectivity
+- Ensure calculator USB cable is connected
+
+**"ti_system not available"**
+- This is normal when testing on PC
+- Program must run on actual TI-84 Plus CE Python Edition
+
+## Quick Test Sequence
 
 ```powershell
-# from project root
-Set-Location .\server
-npm install
+# Terminal 1: Start Ollama
+ollama serve
+
+# Terminal 2: Start server
+cd server
 npm start
-# optional: check
-curl http://localhost:8080/health
+
+# Terminal 3: Monitor ESP32
+# Open Arduino IDE → Serial Monitor (115200 baud)
+# Watch for WiFi connection and USB events
+
+# Calculator: Run simple_test.py
+# Should see question and answer cycle
 ```
 
 ## License

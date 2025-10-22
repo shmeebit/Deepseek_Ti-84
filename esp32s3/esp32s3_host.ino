@@ -117,26 +117,100 @@ void setup() {
 }
 
 void loop() {
-  // Minimal demo: enumerate + poll events
+  // Phase 1: Wait for calculator attachment
   static bool attached = false;
+  static bool pipes_open = false;
+  static unsigned long last_poll = 0;
+  
   if (usbHostReady && !attached) {
     attached = tiusb::wait_for_calculator();
     if (attached) {
       Serial.println("Calculator attached. Opening pipes...");
       if (tiusb::open_pipes()) {
-        Serial.println("Pipes open.");
+        Serial.println("Pipes open. Ready for commands!");
+        Serial.println("Calculator should set Str1 with question, then set Str0=\"GO\" to trigger");
+        pipes_open = true;
       } else {
         Serial.println("Failed to open pipes.");
+        attached = false; // retry
       }
     }
   }
 
-  // TODO: Once endpoints are known, implement a small command loop similar to the CBL2 path:
-  // - Pull a command string/real from calc (silent transfer)
-  // - Make HTTP call to server
-  // - Push response back to calc (paged)
+  // Phase 2: Poll for commands from calculator
+  // Protocol: Calculator writes question to Str1, then writes "GO" to Str0 to signal ready
+  if (attached && pipes_open && wifiReady && millis() - last_poll > 500) {
+    last_poll = millis();
+    
+    String trigger;
+    if (tiusb::get_str(0, trigger)) {
+      trigger.trim();
+      if (trigger == "GO" || trigger == "ASK") {
+        Serial.println("Trigger detected! Reading question from Str1...");
+        
+        String question;
+        if (tiusb::get_str(1, question)) {
+          question.trim();
+          
+          if (question.length() > 0) {
+            Serial.printf("Question: %s\n", question.c_str());
+            
+            // Clear trigger
+            tiusb::set_str(0, "WAIT");
+            
+            // Make HTTP request to server
+            String url = serverBase + "/gpt/ask?question=" + urlEncode(question);
+            String answer;
+            
+            Serial.println("Querying DeepSeek...");
+            if (http_get(url, answer)) {
+              Serial.printf("Answer received (%d chars)\n", answer.length());
+              
+              // If answer is too long, truncate or page it
+              if (answer.length() > 255) {
+                answer = answer.substring(0, 252) + "...";
+                Serial.println("Answer truncated to fit calculator string limit");
+              }
+              
+              // Send answer back to Str2
+              if (tiusb::set_str(2, answer)) {
+                Serial.println("Answer sent to Str2");
+                // Signal completion
+                tiusb::set_str(0, "DONE");
+              } else {
+                Serial.println("Failed to send answer");
+                tiusb::set_str(0, "ERROR");
+              }
+            } else {
+              Serial.println("HTTP request failed");
+              tiusb::set_str(2, "Network error");
+              tiusb::set_str(0, "ERROR");
+            }
+          }
+        } else {
+          Serial.println("Failed to read Str1");
+        }
+      }
+    }
+    
+    // Handle USB events to detect disconnection
+    usb_host_client_event_msg_t msg;
+    if (usb_host_client_receive(g_usb_client, &msg, 0) == ESP_OK) {
+      if (msg.event == USB_HOST_CLIENT_EVENT_DEV_GONE) {
+        Serial.println("Calculator disconnected");
+        attached = false;
+        pipes_open = false;
+        if (g_dev && msg.free_dev.address == g_dev_addr) {
+          if (g_cfg) { free((void*)g_cfg); g_cfg = nullptr; }
+          usb_host_device_close(g_usb_client, g_dev);
+          g_dev = nullptr;
+          g_dev_addr = 0;
+        }
+      }
+    }
+  }
 
-  delay(50);
+  delay(10);
 }
 
 // ---- WiFi helpers ----
@@ -246,8 +320,6 @@ namespace tiusb {
   }
 
   bool open_pipes() {
-    // TODO: parse configuration/interface descriptors, find bulk endpoints
-    // that TI link protocol uses, and prepare transfers.
     if (!g_dev || !g_cfg) {
       Serial.println("open_pipes: no device/config yet");
       return false;
@@ -255,16 +327,211 @@ namespace tiusb {
     Serial.println("open_pipes: parsing endpoints");
     if (find_bulk_endpoints(g_cfg, g_ep_in, g_ep_out)) {
       Serial.printf("Found bulk endpoints: IN=0x%02X OUT=0x%02X\n", g_ep_in, g_ep_out);
-      // TODO: claim interface and prepare transfer objects
-      return true; // endpoints identified
+      
+      // Claim interface 0 (TI calculators typically use interface 0 for USB communication)
+      esp_err_t err = usb_host_interface_claim(g_usb_client, g_dev, 0, 0);
+      if (err != ESP_OK) {
+        Serial.printf("Failed to claim interface 0: %d\n", (int)err);
+        return false;
+      }
+      Serial.println("Interface 0 claimed successfully");
+      
+      return true; // endpoints identified and interface claimed
     } else {
       Serial.println("No bulk endpoints found yet");
       return false;
     }
   }
 
-  bool get_str(uint8_t, String&) { return false; }
-  bool set_str(uint8_t, const String&) { return false; }
+  // TI Link Protocol Commands (simplified for string variables)
+  // Based on TI-84 Plus CE link protocol specification
+  static const uint8_t CMD_VAR_REQUEST = 0x09;    // Request variable
+  static const uint8_t CMD_VAR_CONTENTS = 0x06;   // Variable contents
+  static const uint8_t CMD_ACK = 0x56;            // Acknowledgement
+  static const uint8_t CMD_CONTINUE = 0x09;       // Continue/Ready
+  static const uint8_t TYPE_STR = 0x04;           // String variable type
+  
+  // Helper: send packet to calculator
+  bool send_packet(const uint8_t* data, size_t len, uint32_t timeout_ms = 1000) {
+    if (!g_dev || !g_ep_out) return false;
+    
+    usb_transfer_t* transfer;
+    esp_err_t err = usb_host_transfer_alloc(len, 0, &transfer);
+    if (err != ESP_OK) return false;
+    
+    memcpy(transfer->data_buffer, data, len);
+    transfer->device_handle = g_dev;
+    transfer->bEndpointAddress = g_ep_out;
+    transfer->num_bytes = len;
+    transfer->timeout_ms = timeout_ms;
+    
+    err = usb_host_transfer_submit(transfer);
+    if (err == ESP_OK) {
+      // Wait for completion (synchronous)
+      unsigned long start = millis();
+      while (transfer->status == USB_TRANSFER_STATUS_PENDING && millis() - start < timeout_ms) {
+        delay(1);
+      }
+    }
+    
+    bool success = (transfer->status == USB_TRANSFER_STATUS_COMPLETED);
+    usb_host_transfer_free(transfer);
+    return success;
+  }
+  
+  // Helper: receive packet from calculator
+  bool recv_packet(uint8_t* data, size_t max_len, size_t& actual_len, uint32_t timeout_ms = 1000) {
+    if (!g_dev || !g_ep_in) return false;
+    
+    usb_transfer_t* transfer;
+    esp_err_t err = usb_host_transfer_alloc(max_len, 0, &transfer);
+    if (err != ESP_OK) return false;
+    
+    transfer->device_handle = g_dev;
+    transfer->bEndpointAddress = g_ep_in;
+    transfer->num_bytes = max_len;
+    transfer->timeout_ms = timeout_ms;
+    
+    err = usb_host_transfer_submit(transfer);
+    if (err == ESP_OK) {
+      unsigned long start = millis();
+      while (transfer->status == USB_TRANSFER_STATUS_PENDING && millis() - start < timeout_ms) {
+        delay(1);
+      }
+    }
+    
+    bool success = false;
+    if (transfer->status == USB_TRANSFER_STATUS_COMPLETED) {
+      actual_len = transfer->actual_num_bytes;
+      memcpy(data, transfer->data_buffer, actual_len);
+      success = true;
+    }
+    
+    usb_host_transfer_free(transfer);
+    return success;
+  }
+
+  // Read string variable from calculator (simplified implementation)
+  // varIndex: 0-9 for Str0-Str9 
+  bool get_str(uint8_t varIndex, String& out) {
+    if (!g_dev || varIndex > 9) return false;
+    
+    // Build variable name (e.g., "Str1")
+    char varName[5];
+    snprintf(varName, sizeof(varName), "Str%d", varIndex);
+    
+    // TI Link protocol: Request variable packet
+    // Format: [0x01, cmd, len_lo, len_hi, type, namelen, name..., checksum_lo, checksum_hi]
+    uint8_t req[16];
+    req[0] = 0x01; // Machine ID (computer)
+    req[1] = CMD_VAR_REQUEST;
+    req[2] = 5; // data length low
+    req[3] = 0; // data length high
+    req[4] = TYPE_STR;
+    req[5] = 4; // name length (e.g., "Str1")
+    memcpy(&req[6], varName, 4);
+    
+    // Calculate checksum (sum of data bytes)
+    uint16_t checksum = 0;
+    for (int i = 4; i < 10; i++) checksum += req[i];
+    req[10] = checksum & 0xFF;
+    req[11] = (checksum >> 8) & 0xFF;
+    
+    Serial.printf("Requesting %s from calculator...\n", varName);
+    
+    if (!send_packet(req, 12, 2000)) {
+      Serial.println("Failed to send variable request");
+      return false;
+    }
+    
+    // Wait for acknowledgement or variable contents
+    uint8_t resp[256];
+    size_t resp_len = 0;
+    
+    if (!recv_packet(resp, sizeof(resp), resp_len, 2000)) {
+      Serial.println("No response from calculator");
+      return false;
+    }
+    
+    // Parse response - look for CMD_VAR_CONTENTS (0x06) or error
+    if (resp_len < 4 || resp[1] != CMD_VAR_CONTENTS) {
+      Serial.printf("Unexpected response: cmd=0x%02X\n", resp_len > 1 ? resp[1] : 0);
+      return false;
+    }
+    
+    // Extract string data from packet
+    // Format: [0x01, 0x06, len_lo, len_hi, data_len_lo, data_len_hi, ...string..., checksum]
+    uint16_t data_len = resp[4] | (resp[5] << 8);
+    if (data_len > 0 && resp_len >= 6 + data_len) {
+      out = "";
+      for (uint16_t i = 0; i < data_len; i++) {
+        out += (char)resp[6 + i];
+      }
+      Serial.printf("Received: '%s'\n", out.c_str());
+      return true;
+    }
+    
+    return false;
+  }
+
+  // Write string variable to calculator
+  bool set_str(uint8_t varIndex, const String& val) {
+    if (!g_dev || varIndex > 9) return false;
+    
+    char varName[5];
+    snprintf(varName, sizeof(varName), "Str%d", varIndex);
+    
+    // TI Link protocol: Variable contents packet
+    uint8_t packet[256];
+    uint16_t str_len = val.length();
+    
+    packet[0] = 0x01; // Machine ID
+    packet[1] = CMD_VAR_CONTENTS;
+    
+    // Calculate total data length: type(1) + namelen(1) + name(4) + datalen(2) + data
+    uint16_t data_len = 1 + 1 + 4 + 2 + str_len;
+    packet[2] = data_len & 0xFF;
+    packet[3] = (data_len >> 8) & 0xFF;
+    
+    packet[4] = TYPE_STR;
+    packet[5] = 4; // name length
+    memcpy(&packet[6], varName, 4);
+    packet[10] = str_len & 0xFF;
+    packet[11] = (str_len >> 8) & 0xFF;
+    
+    // Copy string data
+    for (uint16_t i = 0; i < str_len; i++) {
+      packet[12 + i] = val[i];
+    }
+    
+    // Calculate checksum
+    uint16_t checksum = 0;
+    for (uint16_t i = 4; i < 12 + str_len; i++) {
+      checksum += packet[i];
+    }
+    packet[12 + str_len] = checksum & 0xFF;
+    packet[13 + str_len] = (checksum >> 8) & 0xFF;
+    
+    Serial.printf("Sending '%s' to %s...\n", val.c_str(), varName);
+    
+    if (!send_packet(packet, 14 + str_len, 2000)) {
+      Serial.println("Failed to send variable contents");
+      return false;
+    }
+    
+    // Wait for ACK
+    uint8_t resp[16];
+    size_t resp_len = 0;
+    if (recv_packet(resp, sizeof(resp), resp_len, 2000)) {
+      if (resp_len >= 2 && resp[1] == CMD_ACK) {
+        Serial.println("Calculator acknowledged");
+        return true;
+      }
+    }
+    
+    return false;
+  }
+
   bool get_real(char, double&) { return false; }
   bool set_real(char, double) { return false; }
 }
