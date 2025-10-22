@@ -1,10 +1,16 @@
-# TI-32 Carrier PCB Guide (XIAO ESP32S3 Plus → TI‑84 CE over USB Host)
+# TI-32 Carrier PCB Guide (Seeed Studio XIAO ESP32S3 → TI‑84 CE over USB Host)
 
-This guide describes a compact carrier PCB that holds the XIAO ESP32S3 Plus, battery power path, a 5V VBUS source, and a receptacle for the calculator. It’s designed as a simple, safe, reproducible wiring on a board.
+This guide describes a compact carrier PCB specifically designed for the **Seeed Studio XIAO ESP32S3**. It includes the battery power path, 5V VBUS generation, high-side switch control, and a receptacle for the calculator. 
+
+**Why XIAO ESP32S3?**
+- Ultra-compact (21mm x 17.5mm)
+- Built-in battery charging
+- Native USB OTG support
+- Perfect for portable calculator AI assistant!
 
 ## Functional blocks
 
-- U1: Seeed XIAO ESP32S3 Plus (module). Keep clear area for antenna.
+- U1: **Seeed Studio XIAO ESP32S3** (module). Keep clear area for antenna (top edge of board).
 - J1: USB receptacle for the calculator
   - Option A: USB‑A female (simplest)
   - Option B: USB‑C female with 5.1 kΩ CC pull‑ups (source‑only)

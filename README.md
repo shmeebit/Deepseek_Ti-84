@@ -15,18 +15,24 @@ Portable calculator ↔ ESP32‑S3 bridge to a local LLM via Ollama.
 
 ## Quick start
 
-1) Server + Ollama
+**Recommended Hardware**: Seeed Studio XIAO ESP32S3 (compact, battery-ready, perfect for this project!)
+
+1) **Server + Ollama**
    - Install Ollama and pull a DeepSeek‑R1 variant (e.g., `deepseek-r1:latest`).
    - In `server/`, copy `.env.example` to `.env` and set `OLLAMA_URL` and `OLLAMA_MODEL`.
    - Start the server. It exposes `/gpt` and helper endpoints.
-2) ESP32‑S3 firmware
+   
+2) **ESP32‑S3 firmware (XIAO ESP32S3)**
+   - See **[XIAO_ESP32S3_GUIDE.md](XIAO_ESP32S3_GUIDE.md)** for complete setup instructions
    - Edit `esp32/secrets.h` with your Wi‑Fi and server base URL.
-   - Build and flash `esp32s3/esp32s3_host.ino` on an ESP32‑S3 board with USB host capability.
-   - XIAO ESP32S3 Plus: provide 5V VBUS via an external 5V source and a high‑side switch (e.g., AP2331/TPS2553) controlled by a GPIO.
+   - Flash `esp32s3/esp32s3_host.ino` using Arduino IDE
+   - **Important**: XIAO requires external 5V VBUS circuit (boost converter + high‑side switch on GPIO10/D16)
    - Open Serial Monitor (115200) to confirm Wi‑Fi connects and USB Host installs.
-3) Connect the calculator
-   - Use a USB‑C OTG/host adapter into the ESP’s host port.
-   - Ensure 5V VBUS is sourced to the USB port; otherwise the calculator won’t enumerate.
+   
+3) **Connect the calculator**
+   - Transfer Python program from `ti84/` to your TI-84 Plus CE
+   - Connect calculator to XIAO ESP32S3 via USB
+   - Ensure 5V VBUS is provided to calculator (required for USB enumeration)
 
 ## Current Status
 
@@ -169,7 +175,9 @@ Bring‑up checklist
    curl "http://localhost:8080/gpt/ask?question=What+is+2+plus+2"
    ```
 
-### Step 2: Flash ESP32-S3 Firmware
+### 2. Flash ESP32-S3 Firmware (XIAO ESP32S3)
+
+**📖 See [XIAO_ESP32S3_GUIDE.md](XIAO_ESP32S3_GUIDE.md) for detailed XIAO-specific instructions**
 
 1. **Configure WiFi & Server**:
    - Edit `esp32/secrets.h`
@@ -182,10 +190,15 @@ Bring‑up checklist
    # Look for "IPv4 Address" under your WiFi adapter
    ```
 
-2. **Flash Firmware**:
+2. **Arduino IDE Setup for XIAO**:
+   - Install ESP32 board support (2.0.14+)
+   - Select board: **Tools → Board → esp32 → XIAO_ESP32S3**
+   - Set **USB CDC On Boot: Enabled**
+   - Set **USB Mode: Hardware CDC and JTAG**
+   
+3. **Flash Firmware**:
    - Open `esp32s3/esp32s3_host.ino` in Arduino IDE
-   - Select board: "ESP32S3 Dev Module" or "XIAO ESP32S3"
-   - Select port for your ESP32-S3
+   - Select your XIAO's COM port
    - Click Upload
    
 3. **Verify Connection**:
@@ -217,17 +230,24 @@ Bring‑up checklist
    - On calculator, run `ti32_ai` program
    - Follow menu to ask questions
 
-### Step 4: Hardware Assembly (Optional Battery Power)
+### Step 4: Hardware Assembly (XIAO ESP32S3 Power Circuit)
 
-For portable use, follow the wiring guide above or build the PCB:
+**⚠️ Critical**: XIAO ESP32S3 does NOT provide 5V VBUS - you must add external power circuit!
 
-1. Follow `pcb/README.md` for complete PCB design
-2. Wire according to schematic in `pcb/ti-32-carrier/`
+**Quick breadboard setup** (for testing):
+- External 5V source → Calculator VBUS
+- Common ground between XIAO and 5V source
+- XIAO USB D+/D- → Calculator D+/D-
+
+**Battery-powered setup** (recommended):
+1. See **[XIAO_ESP32S3_GUIDE.md](XIAO_ESP32S3_GUIDE.md)** for wiring diagrams
+2. Follow `pcb/README.md` for complete PCB design
 3. Key components:
-   - 5V boost converter (e.g., MT3608, TPS61023)
-   - High-side switch (e.g., AP2331, TPS2553)
+   - 5V boost converter (MT3608 or TPS61023)
+   - High-side switch (AP2331 or TPS2553) with EN on GPIO10/D16
    - USB-A receptacle for calculator
    - LiPo battery (3.7V, 1000-2000mAh)
+   - XIAO has built-in battery charging!
 
 ## Troubleshooting
 

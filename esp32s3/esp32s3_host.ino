@@ -1,8 +1,8 @@
 // ESP32-S3 USB Host bridge for TI-84 Plus CE Python
 // Goal: Calculator (USB device) <-> ESP32-S3 (USB Host + WiFi) <-> Node server (Ollama)
-// Status: Scaffold - enumerates device (to be implemented) and preserves existing HTTP bridge structure.
-// Note: Requires an ESP32-S3 board that supports USB OTG Host and can SOURCE 5V VBUS to the USB port.
-//       XIAO ESP32S3 Plus may not expose host VBUS. Verify board docs; otherwise use ESP32-S3-USB-OTG devkit.
+// Optimized for: Seeed Studio XIAO ESP32S3
+// Note: XIAO ESP32S3 requires external 5V VBUS supply via high-side switch controlled by GPIO10 (D16).
+//       The XIAO does not provide 5V on its USB port by default - you must add external power circuit.
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -27,12 +27,13 @@ extern "C" {
 static const int PASSWORD = 69420; // keep protocol compatible with existing launcher if desired
 static String serverBase = String(SERVER);
 
-// --- Hardware: VBUS high-side switch enable pin ---
-// Default: GPIO10 which is D16 on XIAO ESP32S3 Plus (per Seeed pinout)
+// --- Hardware: VBUS high-side switch enable pin for XIAO ESP32S3 ---
+// GPIO10 (labeled D16 on XIAO ESP32S3 pinout)
 // This pin drives the EN of your 5V high-side switch that sources USB VBUS to the calculator.
-// Change this if you wire EN to a different pin.
+// On XIAO ESP32S3, the USB-C port does NOT provide 5V output - you must add external circuit.
+// Recommended: 5V boost converter → high-side switch (AP2331/TPS2553) → calculator VBUS
 #ifndef PIN_VBUS_EN
-#define PIN_VBUS_EN 10 // GPIO10 (D16)
+#define PIN_VBUS_EN 10 // GPIO10 = D16 on XIAO ESP32S3
 #endif
 
 // --- State ---

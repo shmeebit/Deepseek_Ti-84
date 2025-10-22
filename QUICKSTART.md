@@ -6,9 +6,12 @@ Get your calculator talking to AI in 15 minutes!
 
 ### Hardware
 - TI-84 Plus CE (Python Edition)
-- ESP32-S3 development board (e.g., XIAO ESP32S3 or ESP32-S3-DevKitC)
-- USB-C to USB-A cable or USB OTG adapter
+- **Seeed Studio XIAO ESP32S3** (recommended - compact & battery-ready!)
+- 5V power circuit (boost converter + switch) - *XIAO requires external VBUS*
+- USB cable for calculator connection
 - Computer running Windows/Mac/Linux
+
+**📖 See [XIAO_ESP32S3_GUIDE.md](XIAO_ESP32S3_GUIDE.md) for XIAO-specific setup!**
 
 ### Software
 - Node.js (https://nodejs.org/)
@@ -47,11 +50,13 @@ Server should show: `TI-32 Server with DeepSeek-R1 listening on port 8080`
    #define SERVER "http://192.168.1.XXX:8080"  // Your IP here
    ```
 
-3. Flash to ESP32:
+3. Flash to XIAO ESP32S3:
    - Open `esp32s3/esp32s3_host.ino` in Arduino IDE
-   - Select your ESP32-S3 board
+   - Select board: **XIAO_ESP32S3** (Tools → Board → esp32)
+   - Set **USB CDC On Boot: Enabled**
    - Click Upload
    - Open Serial Monitor (115200) - should see "WiFi: connected"
+   - **Important**: Wire 5V VBUS circuit (see XIAO_ESP32S3_GUIDE.md)
 
 ### 3. Calculator Program (2 minutes)
 
