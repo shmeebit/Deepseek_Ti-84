@@ -1,0 +1,11 @@
+(kicad_pcb (version 20240108) (generator "TI-32-Generator")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (34 "Edge.Cuts" user)
+  )
+  (gr_rect (start 0 0) (end 60 35) (layer "Edge.Cuts") (width 0.1))
+  (gr_text "TI-32 Carrier - Starter" (at 5 3) (layer "F.SilkS") (effects (font (size 1.2 1.2))))
+)
