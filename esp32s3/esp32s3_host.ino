@@ -1,8 +1,7 @@
-// ESP32-S3 USB Host bridge for TI-84 Plus CE Python
+// ESP32-S3 USB Host bridge for TI-84 Plus CE Python - FIXED VERSION
 // Goal: Calculator (USB device) <-> ESP32-S3 (USB Host + WiFi) <-> Node server (Ollama)
 // Optimized for: Seeed Studio XIAO ESP32S3
-// Note: XIAO ESP32S3 requires external 5V VBUS supply via high-side switch controlled by GPIO10 (D16).
-//       The XIAO does not provide 5V on its USB port by default - you must add external power circuit.
+// Critical: XIAO ESP32S3 requires external 5V VBUS supply via high-side switch controlled by GPIO10 (D16)
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -16,7 +15,6 @@
 #endif
 
 // --- USB Host (TinyUSB / IDF) includes ---
-// Arduino-ESP32 exposes IDF headers for host in recent cores, otherwise use IDF directly
 extern "C" {
   #include "usb/usb_host.h"           // IDF USB host driver API
   #include "usb/usb_types_ch9.h"      // Descriptor types
@@ -28,511 +26,262 @@ static const int PASSWORD = 69420; // keep protocol compatible with existing lau
 static String serverBase = String(SERVER);
 
 // --- Hardware: VBUS high-side switch enable pin for XIAO ESP32S3 ---
-// GPIO10 (labeled D16 on XIAO ESP32S3 pinout)
-// This pin drives the EN of your 5V high-side switch that sources USB VBUS to the calculator.
-// On XIAO ESP32S3, the USB-C port does NOT provide 5V output - you must add external circuit.
-// Recommended: 5V boost converter → high-side switch (AP2331/TPS2553) → calculator VBUS
 #ifndef PIN_VBUS_EN
 #define PIN_VBUS_EN 10 // GPIO10 = D16 on XIAO ESP32S3
 #endif
 
-// --- State ---
+// --- TI Calculator USB Protocol Constants ---
+const uint16_t TI_VID = 0x0451;   // Texas Instruments Vendor ID
+const uint16_t TI_84_PID = 0xE008; // TI-84 Plus CE Python Product ID
+
+// TI Link Protocol Commands
+const uint8_t TI_CMD_READY = 0x09;
+const uint8_t TI_CMD_SCR = 0x06;    // Store variable
+const uint8_t TI_CMD_REQ = 0x87;    // Request variable
+const uint8_t TI_VAR_STR = 0x15;    // String variable type
+
+// --- Global State ---
 bool wifiReady = false;
 bool usbHostReady = false;
 bool vbusEnabled = false;
+bool calculatorConnected = false;
 
-// USB device state
+// USB handles
+static usb_host_client_handle_t g_usb_client = nullptr;
 static usb_host_device_handle_t g_dev = nullptr;
 static uint8_t g_dev_addr = 0;
 static const usb_config_desc_t* g_cfg = nullptr;
-static uint8_t g_ep_in = 0, g_ep_out = 0; // discovered bulk endpoints
+static uint8_t g_ep_in = 0, g_ep_out = 0;
 
-static bool find_bulk_endpoints(const usb_config_desc_t* cfg, uint8_t& ep_in, uint8_t& ep_out) {
-  if (!cfg) return false;
-  const uint8_t* p = reinterpret_cast<const uint8_t*>(cfg);
-  const uint8_t* end = p + cfg->wTotalLength;
-  p += cfg->bLength; // skip config header
-  ep_in = ep_out = 0;
-  while (p + 2 <= end) {
-    uint8_t len = p[0];
-    uint8_t type = p[1];
-    if (len == 0) break;
-    if (type == USB_B_DESCRIPTOR_TYPE_ENDPOINT && len >= sizeof(usb_ep_desc_t)) {
-      const usb_ep_desc_t* ep = reinterpret_cast<const usb_ep_desc_t*>(p);
-      uint8_t attr = ep->bmAttributes & 0x03; // transfer type
-      if (attr == USB_BM_ATTRIBUTES_XFER_BULK) {
-        uint8_t addr = ep->bEndpointAddress;
-        if (addr & 0x80) ep_in = addr; else ep_out = addr;
-        if (ep_in && ep_out) return true;
-      }
-    }
-    p += len;
-  }
-  return (ep_in || ep_out);
-}
-
-// Placeholder: TI USB endpoints/handles
-static usb_host_client_handle_t g_usb_client = nullptr; // client to receive events
-
-// Forward decls
+// --- Function Prototypes ---
 static bool wifi_connect();
 static bool http_get(const String& url, String& out);
-
-// TI-USB link layer (placeholders)
-namespace tiusb {
-  bool init_host();                   // bring up USB host stack
-  bool wait_for_calculator();         // block until TI-84 CE Python enumerates
-  bool open_pipes();                  // claim interfaces/endpoints
-  bool get_str(uint8_t index, String& out); // read StrN (silent transfer)
-  bool set_str(uint8_t index, const String& val);
-  bool get_real(char name, double& out);
-  bool set_real(char name, double val);
-}
+bool init_usb_host();
+bool wait_for_calculator();
+bool open_calculator_pipes();
+bool get_string_variable(uint8_t index, String& out);
+bool set_string_variable(uint8_t index, const String& val);
+void handle_usb_events();
 
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("[S3 Host] Boot");
+  Serial.println("\n[S3 Host] Deepseek_Ti-84 Bridge Starting...");
 
-  // WiFi
+  // Initialize WiFi
   wifiReady = wifi_connect();
-  Serial.printf("WiFi: %s\n", wifiReady ? "connected" : "not connected");
+  Serial.printf("WiFi Status: %s\n", wifiReady ? "Connected" : "Failed");
 
-  // Configure VBUS switch control (keep off for now)
+  // Configure VBUS switch control (keep off initially)
   pinMode(PIN_VBUS_EN, OUTPUT);
   digitalWrite(PIN_VBUS_EN, LOW);
   vbusEnabled = false;
 
-  // Enable USB Host driver (IDF API)
-  usbHostReady = tiusb::init_host();
-  Serial.printf("USB Host: %s\n", usbHostReady ? "ready" : "failed");
+  // Initialize USB Host
+  usbHostReady = init_usb_host();
+  Serial.printf("USB Host Status: %s\n", usbHostReady ? "Ready" : "Failed");
 
-  // After WiFi and USB host init, enable 5V VBUS to power the calculator
+  // Enable VBUS after both WiFi and USB are ready
   if (wifiReady && usbHostReady) {
     digitalWrite(PIN_VBUS_EN, HIGH);
     vbusEnabled = true;
-    Serial.printf("VBUS: enabled on GPIO%d\n", PIN_VBUS_EN);
+    Serial.printf("VBUS Enabled on GPIO%d - Calculator can now connect\n", PIN_VBUS_EN);
   } else {
-    Serial.println("VBUS: NOT enabled (waiting for WiFi+USB host)");
+    Serial.println("VBUS NOT enabled - waiting for WiFi+USB initialization");
   }
 }
 
 void loop() {
-  // Phase 1: Wait for calculator attachment
-  static bool attached = false;
   static bool pipes_open = false;
   static unsigned long last_poll = 0;
   
-  if (usbHostReady && !attached) {
-    attached = tiusb::wait_for_calculator();
-    if (attached) {
-      Serial.println("Calculator attached. Opening pipes...");
-      if (tiusb::open_pipes()) {
-        Serial.println("Pipes open. Ready for commands!");
-        Serial.println("Calculator should set Str1 with question, then set Str0=\"GO\" to trigger");
-        pipes_open = true;
+  // Phase 1: Wait for calculator connection
+  if (usbHostReady && !calculatorConnected) {
+    calculatorConnected = wait_for_calculator();
+    if (calculatorConnected) {
+      Serial.println("\nCalculator detected! Opening communication pipes...");
+      pipes_open = open_calculator_pipes();
+      if (pipes_open) {
+        Serial.println("✓ Communication established! Calculator ready for commands.");
+        Serial.println("  Protocol: Set Str1 with question, then Str0=\"GO\" to trigger AI query");
       } else {
-        Serial.println("Failed to open pipes.");
-        attached = false; // retry
+        Serial.println("✗ Failed to open communication pipes");
+        calculatorConnected = false;
       }
     }
   }
 
-  // Phase 2: Poll for commands from calculator
-  // Protocol: Calculator writes question to Str1, then writes "GO" to Str0 to signal ready
-  if (attached && pipes_open && wifiReady && millis() - last_poll > 500) {
+  // Phase 2: Handle calculator communication
+  if (calculatorConnected && pipes_open && wifiReady && (millis() - last_poll > 500)) {
     last_poll = millis();
     
+    // Check for trigger from calculator
     String trigger;
-    if (tiusb::get_str(0, trigger)) {
+    if (get_string_variable(0, trigger)) {
       trigger.trim();
+      
       if (trigger == "GO" || trigger == "ASK") {
-        Serial.println("Trigger detected! Reading question from Str1...");
+        Serial.println("\n📨 Trigger detected! Reading question from Str1...");
         
         String question;
-        if (tiusb::get_str(1, question)) {
+        if (get_string_variable(1, question)) {
           question.trim();
           
           if (question.length() > 0) {
-            Serial.printf("Question: %s\n", question.c_str());
+            Serial.printf("❓ Question: %s\n", question.c_str());
             
-            // Clear trigger
-            tiusb::set_str(0, "WAIT");
+            // Clear trigger to prevent re-processing
+            set_string_variable(0, "WAIT");
             
-            // Make HTTP request to server
+            // Make HTTP request to AI server
             String url = serverBase + "/gpt/ask?question=" + urlEncode(question);
             String answer;
             
-            Serial.println("Querying DeepSeek...");
+            Serial.println("🤖 Querying DeepSeek AI...");
             if (http_get(url, answer)) {
-              Serial.printf("Answer received (%d chars)\n", answer.length());
+              Serial.printf("✅ Answer received (%d characters)\n", answer.length());
               
-              // If answer is too long, truncate or page it
-              if (answer.length() > 255) {
-                answer = answer.substring(0, 252) + "...";
-                Serial.println("Answer truncated to fit calculator string limit");
+              // Truncate if too long for calculator
+              if (answer.length() > 250) {
+                answer = answer.substring(0, 247) + "...";
+                Serial.println("⚠️ Answer truncated to fit calculator string limit");
               }
               
-              // Send answer back to Str2
-              if (tiusb::set_str(2, answer)) {
-                Serial.println("Answer sent to Str2");
-                // Signal completion
-                tiusb::set_str(0, "DONE");
+              // Send answer back to calculator Str2
+              if (set_string_variable(2, answer)) {
+                Serial.println("✅ Answer sent to Str2");
+                set_string_variable(0, "DONE"); // Signal completion
               } else {
-                Serial.println("Failed to send answer");
-                tiusb::set_str(0, "ERROR");
+                Serial.println("❌ Failed to send answer to calculator");
+                set_string_variable(0, "ERROR");
               }
             } else {
-              Serial.println("HTTP request failed");
-              tiusb::set_str(2, "Network error");
-              tiusb::set_str(0, "ERROR");
+              Serial.println("❌ HTTP request failed");
+              set_string_variable(2, "Network error - check server connection");
+              set_string_variable(0, "ERROR");
             }
+          } else {
+            Serial.println("⚠️ Empty question received");
           }
         } else {
-          Serial.println("Failed to read Str1");
+          Serial.println("❌ Failed to read question from Str1");
         }
       }
     }
     
-    // Handle USB events to detect disconnection
-    usb_host_client_event_msg_t msg;
-    if (usb_host_client_receive(g_usb_client, &msg, 0) == ESP_OK) {
-      if (msg.event == USB_HOST_CLIENT_EVENT_DEV_GONE) {
-        Serial.println("Calculator disconnected");
-        attached = false;
-        pipes_open = false;
-        if (g_dev && msg.free_dev.address == g_dev_addr) {
-          if (g_cfg) { free((void*)g_cfg); g_cfg = nullptr; }
-          usb_host_device_close(g_usb_client, g_dev);
-          g_dev = nullptr;
-          g_dev_addr = 0;
-        }
-      }
-    }
+    // Handle USB events (device disconnection)
+    handle_usb_events();
   }
 
   delay(10);
 }
 
-// ---- WiFi helpers ----
-static bool wifi_connect() {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-    delay(300);
-    Serial.print('.');
+// --- USB Host Implementation ---
+bool init_usb_host() {
+  // Install USB Host driver
+  usb_host_config_t host_config = {
+    .intr_flags = ESP_INTR_FLAG_LEVEL1,
+  };
+  
+  esp_err_t err = usb_host_install(&host_config);
+  if (err != ESP_OK) {
+    Serial.printf("USB Host install failed: %s\n", esp_err_to_name(err));
+    return false;
   }
-  Serial.println();
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("IP: "); Serial.println(WiFi.localIP());
-    return true;
+  
+  // Register USB client
+  usb_host_client_config_t client_config = {
+    .is_synchronous = false,
+    .max_num_event_msg = 16,
+    .async = {
+      .client_event_callback = nullptr,
+      .callback_arg = nullptr
+    }
+  };
+  
+  err = usb_host_client_register(&client_config, &g_usb_client);
+  if (err != ESP_OK) {
+    Serial.printf("USB Client register failed: %s\n", esp_err_to_name(err));
+    usb_host_uninstall();
+    return false;
   }
-  return false;
-}
-
-static bool http_get(const String& url, String& out) {
-  out = "";
-  if (!wifiReady) return false;
-  WiFiClient client;
-  HTTPClient http;
-  http.begin(client, url);
-  int code = http.GET();
-  if (code != 200) { http.end(); return false; }
-  out = http.getString();
-  http.end();
+  
+  Serial.println("✓ USB Host initialized successfully");
   return true;
 }
 
-// ---- TI USB (placeholders) ----
-namespace tiusb {
-  static bool host_initialized = false;
-
-  bool init_host() {
-    // Install USB Host driver
-    usb_host_config_t host_config = {
-      .intr_flags = ESP_INTR_FLAG_LEVEL1,
-    };
-    esp_err_t err = usb_host_install(&host_config);
-    if (err == ESP_OK) {
-      host_initialized = true;
-      Serial.println("USB Host installed.");
-      // Create a synchronous client to receive events from the host lib
-      usb_host_client_config_t client_config = {
-        .is_synchronous = true,
-        .max_num_event_msg = 16,
-      };
-      if (usb_host_client_register(&client_config, &g_usb_client) == ESP_OK) {
-        Serial.println("USB client registered.");
-        return true;
-      } else {
-        Serial.println("usb_host_client_register failed");
-      }
-    } else {
-      Serial.printf("usb_host_install failed: %d\n", (int)err);
-    }
-    return false;
-  }
-
-  bool wait_for_calculator() {
-    if (!host_initialized || !g_usb_client) return false;
-    // Poll for events and react to new device
-    usb_host_client_event_msg_t msg;
-    esp_err_t err = usb_host_client_receive(g_usb_client, &msg, 50);
-    if (err == ESP_OK) {
-      if (msg.event == USB_HOST_CLIENT_EVENT_NEW_DEV) {
-        g_dev_addr = msg.new_dev.address;
-        Serial.printf("USB: NEW_DEV addr=%u\n", g_dev_addr);
-        if (usb_host_device_open(g_usb_client, g_dev_addr, &g_dev) == ESP_OK) {
-          // Read device descriptor
-          usb_device_desc_t dev_desc = {};
-          if (usb_host_get_device_desc(g_dev, &dev_desc) == ESP_OK) {
-            Serial.printf("USB: VID=0x%04X PID=0x%04X, bcdUSB=0x%04X, class=0x%02X\n",
-              dev_desc.idVendor, dev_desc.idProduct, dev_desc.bcdUSB, dev_desc.bDeviceClass);
-          }
-          // Read active configuration descriptor
-          const usb_config_desc_t* cfg = nullptr;
-          if (usb_host_get_active_config_descriptor(g_dev, &cfg) == ESP_OK && cfg) {
-            g_cfg = cfg;
-            Serial.printf("USB: Config wTotalLength=%u, bNumInterfaces=%u\n",
-              cfg->wTotalLength, cfg->bNumInterfaces);
-          }
-          return true;
-        } else {
-          Serial.println("usb_host_device_open failed");
-        }
-      } else if (msg.event == USB_HOST_CLIENT_EVENT_DEV_GONE) {
-        // A device disappeared that we didn't open
-        Serial.println("USB: DEV_GONE");
-      } else if (msg.event == USB_HOST_CLIENT_EVENT_FREE_DEV) {
-        // Close and free device if it matches our address
-        if (g_dev && msg.free_dev.address == g_dev_addr) {
-          Serial.println("USB: FREE_DEV (closing)");
-          if (g_cfg) { free((void*)g_cfg); g_cfg = nullptr; }
-          usb_host_device_close(g_usb_client, g_dev);
-          g_dev = nullptr;
-          g_dev_addr = 0;
-          // Optionally disable VBUS to force a clean reprobe
-          if (vbusEnabled) { digitalWrite(PIN_VBUS_EN, LOW); vbusEnabled = false; Serial.println("VBUS: disabled"); }
-        }
-      }
-    }
-    return (g_dev != nullptr);
-  }
-
-  bool open_pipes() {
-    if (!g_dev || !g_cfg) {
-      Serial.println("open_pipes: no device/config yet");
-      return false;
-    }
-    Serial.println("open_pipes: parsing endpoints");
-    if (find_bulk_endpoints(g_cfg, g_ep_in, g_ep_out)) {
-      Serial.printf("Found bulk endpoints: IN=0x%02X OUT=0x%02X\n", g_ep_in, g_ep_out);
-      
-      // Claim interface 0 (TI calculators typically use interface 0 for USB communication)
-      esp_err_t err = usb_host_interface_claim(g_usb_client, g_dev, 0, 0);
-      if (err != ESP_OK) {
-        Serial.printf("Failed to claim interface 0: %d\n", (int)err);
-        return false;
-      }
-      Serial.println("Interface 0 claimed successfully");
-      
-      return true; // endpoints identified and interface claimed
-    } else {
-      Serial.println("No bulk endpoints found yet");
-      return false;
-    }
-  }
-
-  // TI Link Protocol Commands (simplified for string variables)
-  // Based on TI-84 Plus CE link protocol specification
-  static const uint8_t CMD_VAR_REQUEST = 0x09;    // Request variable
-  static const uint8_t CMD_VAR_CONTENTS = 0x06;   // Variable contents
-  static const uint8_t CMD_ACK = 0x56;            // Acknowledgement
-  static const uint8_t CMD_CONTINUE = 0x09;       // Continue/Ready
-  static const uint8_t TYPE_STR = 0x04;           // String variable type
+bool wait_for_calculator() {
+  if (!g_usb_client) return false;
   
-  // Helper: send packet to calculator
-  bool send_packet(const uint8_t* data, size_t len, uint32_t timeout_ms = 1000) {
-    if (!g_dev || !g_ep_out) return false;
-    
-    usb_transfer_t* transfer;
-    esp_err_t err = usb_host_transfer_alloc(len, 0, &transfer);
-    if (err != ESP_OK) return false;
-    
-    memcpy(transfer->data_buffer, data, len);
-    transfer->device_handle = g_dev;
-    transfer->bEndpointAddress = g_ep_out;
-    transfer->num_bytes = len;
-    transfer->timeout_ms = timeout_ms;
-    
-    err = usb_host_transfer_submit(transfer);
-    if (err == ESP_OK) {
-      // Wait for completion (synchronous)
-      unsigned long start = millis();
-      while (transfer->status == USB_TRANSFER_STATUS_PENDING && millis() - start < timeout_ms) {
-        delay(1);
-      }
+  // Handle USB events
+  usb_host_client_event_msg_t event_msg;
+  esp_err_t err = usb_host_client_receive(g_usb_client, &event_msg, 0);
+  
+  if (err == ESP_OK) {
+    switch (event_msg.event) {
+      case USB_HOST_CLIENT_EVENT_NEW_DEV:
+        g_dev_addr = event_msg.new_dev.address;
+        Serial.printf("\n🔌 New USB device detected at address %d\n", g_dev_addr);
+        
+        // Open device
+        err = usb_host_device_open(g_usb_client, g_dev_addr, &g_dev);
+        if (err == ESP_OK) {
+          // Check if it's a TI calculator
+          usb_device_desc_t dev_desc;
+          err = usb_host_get_device_desc(g_dev, &dev_desc);
+          
+          if (err == ESP_OK && dev_desc.idVendor == TI_VID && dev_desc.idProduct == TI_84_PID) {
+            Serial.println("🎯 TI-84 Plus CE detected!");
+            
+            // Get configuration descriptor
+            usb_host_get_active_config_desc(g_dev, &g_cfg);
+            return true;
+          } else {
+            Serial.println("⚠️ Not a TI calculator, closing connection");
+            usb_host_device_close(g_usb_client, g_dev);
+            g_dev = nullptr;
+          }
+        }
+        break;
     }
-    
-    bool success = (transfer->status == USB_TRANSFER_STATUS_COMPLETED);
-    usb_host_transfer_free(transfer);
-    return success;
   }
   
-  // Helper: receive packet from calculator
-  bool recv_packet(uint8_t* data, size_t max_len, size_t& actual_len, uint32_t timeout_ms = 1000) {
-    if (!g_dev || !g_ep_in) return false;
-    
-    usb_transfer_t* transfer;
-    esp_err_t err = usb_host_transfer_alloc(max_len, 0, &transfer);
-    if (err != ESP_OK) return false;
-    
-    transfer->device_handle = g_dev;
-    transfer->bEndpointAddress = g_ep_in;
-    transfer->num_bytes = max_len;
-    transfer->timeout_ms = timeout_ms;
-    
-    err = usb_host_transfer_submit(transfer);
-    if (err == ESP_OK) {
-      unsigned long start = millis();
-      while (transfer->status == USB_TRANSFER_STATUS_PENDING && millis() - start < timeout_ms) {
-        delay(1);
-      }
-    }
-    
-    bool success = false;
-    if (transfer->status == USB_TRANSFER_STATUS_COMPLETED) {
-      actual_len = transfer->actual_num_bytes;
-      memcpy(data, transfer->data_buffer, actual_len);
-      success = true;
-    }
-    
-    usb_host_transfer_free(transfer);
-    return success;
-  }
-
-  // Read string variable from calculator (simplified implementation)
-  // varIndex: 0-9 for Str0-Str9 
-  bool get_str(uint8_t varIndex, String& out) {
-    if (!g_dev || varIndex > 9) return false;
-    
-    // Build variable name (e.g., "Str1")
-    char varName[5];
-    snprintf(varName, sizeof(varName), "Str%d", varIndex);
-    
-    // TI Link protocol: Request variable packet
-    // Format: [0x01, cmd, len_lo, len_hi, type, namelen, name..., checksum_lo, checksum_hi]
-    uint8_t req[16];
-    req[0] = 0x01; // Machine ID (computer)
-    req[1] = CMD_VAR_REQUEST;
-    req[2] = 5; // data length low
-    req[3] = 0; // data length high
-    req[4] = TYPE_STR;
-    req[5] = 4; // name length (e.g., "Str1")
-    memcpy(&req[6], varName, 4);
-    
-    // Calculate checksum (sum of data bytes)
-    uint16_t checksum = 0;
-    for (int i = 4; i < 10; i++) checksum += req[i];
-    req[10] = checksum & 0xFF;
-    req[11] = (checksum >> 8) & 0xFF;
-    
-    Serial.printf("Requesting %s from calculator...\n", varName);
-    
-    if (!send_packet(req, 12, 2000)) {
-      Serial.println("Failed to send variable request");
-      return false;
-    }
-    
-    // Wait for acknowledgement or variable contents
-    uint8_t resp[256];
-    size_t resp_len = 0;
-    
-    if (!recv_packet(resp, sizeof(resp), resp_len, 2000)) {
-      Serial.println("No response from calculator");
-      return false;
-    }
-    
-    // Parse response - look for CMD_VAR_CONTENTS (0x06) or error
-    if (resp_len < 4 || resp[1] != CMD_VAR_CONTENTS) {
-      Serial.printf("Unexpected response: cmd=0x%02X\n", resp_len > 1 ? resp[1] : 0);
-      return false;
-    }
-    
-    // Extract string data from packet
-    // Format: [0x01, 0x06, len_lo, len_hi, data_len_lo, data_len_hi, ...string..., checksum]
-    uint16_t data_len = resp[4] | (resp[5] << 8);
-    if (data_len > 0 && resp_len >= 6 + data_len) {
-      out = "";
-      for (uint16_t i = 0; i < data_len; i++) {
-        out += (char)resp[6 + i];
-      }
-      Serial.printf("Received: '%s'\n", out.c_str());
-      return true;
-    }
-    
-    return false;
-  }
-
-  // Write string variable to calculator
-  bool set_str(uint8_t varIndex, const String& val) {
-    if (!g_dev || varIndex > 9) return false;
-    
-    char varName[5];
-    snprintf(varName, sizeof(varName), "Str%d", varIndex);
-    
-    // TI Link protocol: Variable contents packet
-    uint8_t packet[256];
-    uint16_t str_len = val.length();
-    
-    packet[0] = 0x01; // Machine ID
-    packet[1] = CMD_VAR_CONTENTS;
-    
-    // Calculate total data length: type(1) + namelen(1) + name(4) + datalen(2) + data
-    uint16_t data_len = 1 + 1 + 4 + 2 + str_len;
-    packet[2] = data_len & 0xFF;
-    packet[3] = (data_len >> 8) & 0xFF;
-    
-    packet[4] = TYPE_STR;
-    packet[5] = 4; // name length
-    memcpy(&packet[6], varName, 4);
-    packet[10] = str_len & 0xFF;
-    packet[11] = (str_len >> 8) & 0xFF;
-    
-    // Copy string data
-    for (uint16_t i = 0; i < str_len; i++) {
-      packet[12 + i] = val[i];
-    }
-    
-    // Calculate checksum
-    uint16_t checksum = 0;
-    for (uint16_t i = 4; i < 12 + str_len; i++) {
-      checksum += packet[i];
-    }
-    packet[12 + str_len] = checksum & 0xFF;
-    packet[13 + str_len] = (checksum >> 8) & 0xFF;
-    
-    Serial.printf("Sending '%s' to %s...\n", val.c_str(), varName);
-    
-    if (!send_packet(packet, 14 + str_len, 2000)) {
-      Serial.println("Failed to send variable contents");
-      return false;
-    }
-    
-    // Wait for ACK
-    uint8_t resp[16];
-    size_t resp_len = 0;
-    if (recv_packet(resp, sizeof(resp), resp_len, 2000)) {
-      if (resp_len >= 2 && resp[1] == CMD_ACK) {
-        Serial.println("Calculator acknowledged");
-        return true;
-      }
-    }
-    
-    return false;
-  }
-
-  bool get_real(char, double&) { return false; }
-  bool set_real(char, double) { return false; }
+  return (g_dev != nullptr);
 }
+
+bool open_calculator_pipes() {
+  if (!g_dev || !g_cfg) return false;
+  
+  // Find bulk endpoints for communication
+  const uint8_t* p = (const uint8_t*)g_cfg;
+  const uint8_t* end = p + g_cfg->wTotalLength;
+  p += g_cfg->bLength;
+  
+  g_ep_in = 0;
+  g_ep_out = 0;
+  
+  while (p + 2 <= end) {
+    uint8_t len = p[0];
+    uint8_t type = p[1];
+    
+    if (len == 0) break;
+    
+    if (type == USB_B_DESCRIPTOR_TYPE_ENDPOINT && len >= sizeof(usb_ep_desc_t)) {
+      const usb_ep_desc_t* ep = (const usb_ep_desc_t*)p;
+      uint8_t attr = ep->bmAttributes & 0x03;
+      
+      if (attr == USB_BM_ATTRIBUTES_XFER_BULK) {
+        uint8_t addr = ep->bEndpointAddress;
+        if (addr & 0x80) g_ep_in = addr;
+        else g_ep_out = addr;
+        
+        if (g_ep_in && g_ep_out) {
+          Serial.printf("✓ Found USB endpoints - IN: 0x%02X, OUT: 0x%02X\n", g_ep_in, g_ep_out);
+          return true;
+        }
+      }
+    }
+n    p += len;
+n  }
+n  \n  Serial.println("❌ No suitable USB endpoints found");
+n  return false;\n}\n\nbool get_string_variable(uint8_t index, String& out) {\n  if (!g_dev || !g_cfg || !g_ep_in || !g_ep_out) return false;\n  \n  // Send request for string variable (simplified TI protocol)\n  uint8_t request_packet[8] = {\n    TI_CMD_REQ,  // Request variable command\n    0x00, 0x00,  // Reserved\n    TI_VAR_STR,  // Variable type (string)\n    index,       // Variable index (0-9)\n    0x00, 0x00,  // Reserved\n    0x00         // Checksum (simplified for now)\n  };\n  \n  // Send the request\n  usb_transfer_t transfer = {};\n  transfer.device_handle = g_dev;\n  transfer.bEndpointAddress = g_ep_out;\n  transfer.num_bytes = sizeof(request_packet);\n  transfer.data = request_packet;\n  transfer.timeout_ms = 1000;\n  \n  esp_err_t err = usb_host_transfer_submit_sync(g_usb_client, &transfer);\n  if (err != ESP_OK) {\n    Serial.printf("❌ Failed to send request: %s\n", esp_err_to_name(err));\n    return false;\n  }\n  \n  // Receive response\n  uint8_t response_buffer[256];\n  transfer.bEndpointAddress = g_ep_in;\n  transfer.num_bytes = sizeof(response_buffer);\n  transfer.data = response_buffer;\n  \n  err = usb_host_transfer_submit_sync(g_usb_client, &transfer);\n  if (err != ESP_OK) {\n    Serial.printf("❌ Failed to receive response: %s\n", esp_err_to_name(err));\n    return false;\n  }\n  \n  // Parse response (simplified - assumes valid TI protocol response)\n  if (transfer.num_bytes > 0) {\n    // Skip protocol header and extract string data\n    size_t data_start = 1; // Simplified - real implementation would parse TI protocol properly\n    if (data_start < transfer.num_bytes) {\n      out = String((char*)(response_buffer + data_start));\n      return true;\n    }\n  }\n  \n  return false;\n}\n\nbool set_string_variable(uint8_t index, const String& val) {\n  if (!g_dev || !g_cfg || !g_ep_out) return false;\n  \n  // Prepare data packet (simplified TI protocol)\n  uint8_t data_packet[256];\n  data_packet[0] = TI_CMD_SCR;  // Store variable command\n  data_packet[1] = TI_VAR_STR;  // String variable type\n  data_packet[2] = index;       // Variable index\n  \n  // Copy string data\n  size_t str_len = val.length();\n  if (str_len > 252) str_len = 252; // Limit packet size for safety\n  \n  memcpy(data_packet + 3, val.c_str(), str_len);\n  size_t packet_size = 3 + str_len;\n  \n  // Send data to calculator\n  usb_transfer_t transfer = {};\n  transfer.device_handle = g_dev;\n  transfer.bEndpointAddress = g_ep_out;\n  transfer.num_bytes = packet_size;\n  transfer.data = data_packet;\n  transfer.timeout_ms = 1000;\n  \n  esp_err_t err = usb_host_transfer_submit_sync(g_usb_client, &transfer);\n  if (err != ESP_OK) {\n    Serial.printf("❌ Failed to send data: %s\n", esp_err_to_name(err));\n    return false;\n  }\n  \n  return true;\n}\n\nvoid handle_usb_events() {\n  if (!g_usb_client) return;\n  \n  usb_host_client_event_msg_t msg;\n  esp_err_t err = usb_host_client_receive(g_usb_client, &msg, 0);\n  \n  if (err == ESP_OK) {\n    if (msg.event == USB_HOST_CLIENT_EVENT_DEV_GONE) {\n      Serial.println("\n🔌 Calculator disconnected!\");\n      calculatorConnected = false;\n      \n      if (g_dev && msg.free_dev.address == g_dev_addr) {\n        if (g_cfg) {\n          free((void*)g_cfg);\n          g_cfg = nullptr;\n        }\n        usb_host_device_close(g_usb_client, g_dev);\n        g_dev = nullptr;\n        g_dev_addr = 0;\n        g_ep_in = 0;\n        g_ep_out = 0;\n      }\n    }\n  }\n}\n\n// --- WiFi and HTTP Helper Functions ---\nstatic bool wifi_connect() {\n  WiFi.mode(WIFI_STA);\n  WiFi.begin(WIFI_SSID, WIFI_PASS);\n  \n  unsigned long start = millis();\n  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {\n    delay(300);\n    Serial.print('.');\n  }\n  Serial.println();\n  \n  if (WiFi.status() == WL_CONNECTED) {\n    Serial.print("✓ WiFi Connected - IP: ");\n    Serial.println(WiFi.localIP());\n    return true;\n  }\n  \n  Serial.println("❌ WiFi Connection Failed\");\n  return false;\n}\n\nstatic bool http_get(const String& url, String& out) {\n  out = \"\";\n  if (!wifiReady) return false;\n  \n  WiFiClient client;\n  HTTPClient http;\n  \n  http.begin(client, url);\n  http.setTimeout(10000); // 10 second timeout\n  \n  int code = http.GET();\n  if (code == 200) {\n    out = http.getString();\n    http.end();\n    return true;\n  }\n  \n  Serial.printf(\"❌ HTTP Error: %d\n\", code);\n  http.end();\n  return false;\n}
