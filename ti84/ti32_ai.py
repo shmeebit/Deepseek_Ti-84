@@ -1,215 +1,47 @@
 """
-TI-32 AI Assistant for TI-84 Plus CE Python
+TI-32 AI Assistant for TI-84 Plus CE Python - FIXED VERSION
 Communicates with ESP32-S3 via USB to query DeepSeek AI
-
-Usage:
-1. Connect calculator to ESP32-S3 via USB
-2. Run this program
-3. Enter your question
-4. Wait for AI response
+Uses proper ti_system module functions for calculator compatibility
 """
 
 import time
-import sys
-
-# TI-84 CE Python string variable functions
-try:
-    from ti_system import *
-except ImportError:
-    # Fallback for testing on PC
-    print("Warning: ti_system not available (running on PC?)")
-    
-    class MockStr:
-        def __init__(self):
-            self.data = {}
-        
-        def store(self, index, value):
-            self.data[index] = value
-            print(f"[Mock] Str{index} = '{value}'")
-        
-        def recall(self, index):
-            return self.data.get(index, "")
-    
-    str_var = MockStr()
-
+from ti_system import *
 
 def clear_screen():
-    """Clear the screen"""
+    """Clear the calculator screen"""
     try:
         import ti_draw
         ti_draw.clear()
     except:
+        # Fallback for systems without ti_draw
         print("\n" * 10)
 
-
 def display_text(text, x=10, y=10):
-    """Display text on screen"""
+    """Display text on screen at specified coordinates"""
     try:
         import ti_draw
         ti_draw.draw_text(x, y, text)
     except:
         print(text)
 
-
 def get_input(prompt):
-    """Get text input from user"""
+    """Get text input from user with prompt"""
     print(prompt)
     try:
         return input("> ")
-    except:
-        # If input() not available, use a default
-        return "What is 2+2?"
+n    except:
+n        return ""  # Return empty string if input fails\n\ndef send_question(question):\n    \"\"\"\n    Send question to ESP32 via string variables using TI link protocol\n    Protocol:\n    - Str1 = question\n    - Str0 = \"GO\" (trigger)\n    - Wait for Str0 to become \"DONE\" or \"ERROR\"\n    - Read answer from Str2\n    \"\"\"\n    print(\"Sending question to AI...\")\n    \n    # Clear any previous status\n    store_string(\"\", 0)\n    \n    # Store question in Str1\n    store_string(question, 1)\n    \n    # Trigger ESP32 by setting Str0 to \"GO\"\n    store_string(\"GO\", 0)\n    \n    # Wait for response with timeout\n    max_wait = 30  # 30 seconds timeout\n    start_time = time.monotonic()\n    \n    while time.monotonic() - start_time < max_wait:\n        # Check status from ESP32\n        status = recall_string(0)\n        \n        if status == \"DONE\":\n            # Success! Read answer from Str2\n            answer = recall_string(2)\n            return answer, True\n        elif status == \"ERROR\":\n            # ESP32 reported an error\n            return \"ESP32 reported an error\", False\n        elif status == \"WAIT\":\n            # Still processing\n            print(\"Processing...\")\n        \n        # Small delay to avoid overwhelming the system\n        time.sleep(0.5)\n    \n    # Timeout occurred\n    return \"Timeout waiting for response\", False\n\ndef main():\n    \"\"\"Main program loop with improved user interface\"\"\"\n    clear_screen()\n    \n    print(\"=\" * 35)\n    print(\"TI-32 AI Assistant\")\n    print(\"DeepSeek-R1 via ESP32-S3\")\n    print(\"=\" * 35)\n    print()\n    \n    # Initialize - clear status string\n    store_string(\"\", 0)\n    \n    while True:\n        print(\"\\nMain Menu:\")\n        print(\"1. Ask a question\")\n        print(\"2. Math solver\")\n        print(\"3. Quick facts\")\n        print(\"4. Test connection\")\n        print(\"5. Exit\")\n        print()\n        \n        choice = get_input(\"Select option (1-5): \")\n        \n        if choice == \"1\":\n            # General question mode\n            question = get_input(\"\\nEnter your question: \")\n            if question and question.strip():\n                print(\"\\n\" + \"-\" * 35)\n                answer, success = send_question(question.strip())\n                print(\"Answer:\")\n                print(\"-\" * 35)\n                print(answer)\n                print(\"-\" * 35)\n                \n                if not success:\n                    print(\"❌ Failed to get response\")\n                    print(\"Check ESP32 connection and server status\")\n        \n        elif choice == \"2\":\n            # Math solver mode\n            problem = get_input(\"\\nEnter math problem: \")\n            if problem and problem.strip():\n                question = f\"Solve this math problem: {problem.strip()}\"\n                print(\"\\n\" + \"-\" * 35)\n                answer, success = send_question(question)\n                print(\"Solution:\")\n                print(\"-\" * 35)\n                print(answer)\n                print(\"-\" * 35)\n        \n        elif choice == \"3\":\n            # Quick facts mode\n            print(\"\\nQuick fact categories:\")\n            print(\"a) Science & Technology\")\n            print(\"b) History & Culture\")\n            print(\"c) Mathematics\")\n            print(\"d) Geography\")\n            topic = get_input(\"Choose category: \")\n            \n            questions = {\n                \"a\": \"Tell me an interesting science or technology fact\",\n                \"b\": \"Tell me an interesting history or culture fact\", \n                \"c\": \"Tell me an interesting mathematics fact\",\n                \"d\": \"Tell me an interesting geography fact\"\n            }\n            \n            if topic.lower() in questions:\n                print(\"\\n\" + \"-\" * 35)\n                answer, success = send_question(questions[topic.lower()])\n                print(\"Fun Fact:\")\n                print(\"-\" * 35)\n                print(answer)\n                print(\"-\" * 35)\n            else:\n                print(\"❌ Invalid category choice\")\n        \n        elif choice == \"4\":\n            # Test connection\n            print(\"\\nTesting ESP32 connection...\")\n            test_question = \"Hello, this is a test. Please respond with 'Connection OK'\"\n            answer, success = send_question(test_question)\n            \n            if success and \"Connection OK\" in answer:\n                print(\"✅ Connection test successful!\")\n                print(\"ESP32 and AI server are working correctly.\")\n            else:\n                print(\"❌ Connection test failed\")\n                print(\"Please check:\")\n                print(\"1. ESP32 is powered and connected\")\n                print(\"2. USB cable is properly connected\")\n                print(\"3. WiFi and server are running\")\n                print(\"4. Calculator has sufficient power\")\n        \n        elif choice == \"5\":\n            print(\"\\n👋 Goodbye! Thanks for using TI-32 AI Assistant.\")\n            break\n        \n        else:\n            print(\"❌ Invalid choice. Please select 1-5.\")\n        \n        # Pause before returning to menu\n        try:\n            input(\"\\nPress ENTER to continue...\")\n        except:\n            time.sleep(1)\n        \n        clear_screen()\n        print(\"=\" * 35)\n        print(\"TI-32 AI Assistant\")\n        print(\"DeepSeek-R1 via ESP32-S3\")\n        print(\"=\" * 35)\n\nif __name__ == \"__main__\":\n    try:\n        main()\n    except KeyboardInterrupt:\n        print(\"\\n\\n👋 Program interrupted by user.\")\n    except Exception as e:\n        print(f\"\\n❌ Unexpected error: {e}\")\n        print(\"\\nTroubleshooting steps:\")\n        print(\"1. Check ESP32 connection and power\")\n        print(\"2. Verify server is running\")\n        print(\"3. Ensure calculator USB is properly connected\")\n        print(\"4. Check that VBUS 5V power is enabled\")\n```
 
+### **5. Updated Simple Test Program**
+**File: `ti84/simple_test_fixed.py`** (Rename to `simple_test.py` after testing)
+```python
+"""
+Simple Test Program for TI-84 Plus CE Python - FIXED VERSION
+Tests basic communication with ESP32-S3
+"""
 
-def send_question(question):
-    """
-    Send question to ESP32 via string variables
-    Protocol:
-    - Str1 = question
-    - Str0 = "GO" (trigger)
-    - Wait for Str0 to become "DONE" or "ERROR"
-    - Read answer from Str2
-    """
-    print("Sending question to AI...")
-    
-    # Store question in Str1
-    try:
-        str_var.store(1, question)
-    except:
-        pass
-    
-    # Trigger ESP32 by setting Str0 to "GO"
-    try:
-        str_var.store(0, "GO")
-    except:
-        pass
-    
-    # Wait for response (poll Str0 for status)
-    max_wait = 30  # 30 seconds timeout
-    start_time = time.time()
-    
-    while time.time() - start_time < max_wait:
-        try:
-            status = str_var.recall(0)
-        except:
-            status = ""
-        
-        if status == "DONE":
-            # Read answer from Str2
-            try:
-                answer = str_var.recall(2)
-                return answer, True
-            except:
-                return "Error reading response", False
-        
-        elif status == "ERROR":
-            return "ESP32 reported an error", False
-        
-        elif status == "WAIT":
-            print("Processing...")
-        
-        # Small delay to avoid overwhelming the system
-        time.sleep(0.5)
-    
-    return "Timeout waiting for response", False
+from ti_system import *
+import time
 
-
-def main():
-    """Main program loop"""
-    clear_screen()
-    
-    print("=" * 30)
-    print("TI-32 AI Assistant")
-    print("DeepSeek-R1 via ESP32-S3")
-    print("=" * 30)
-    print()
-    
-    # Initialize - clear status string
-    try:
-        str_var.store(0, "")
-    except:
-        pass
-    
-    while True:
-        print()
-        print("Options:")
-        print("1. Ask a question")
-        print("2. Math solver")
-        print("3. Quick facts")
-        print("4. Exit")
-        print()
-        
-        choice = get_input("Select (1-4): ")
-        
-        if choice == "1":
-            # Ask any question
-            question = get_input("Your question: ")
-            if question and question.strip():
-                answer, success = send_question(question.strip())
-                print()
-                print("Answer:")
-                print("-" * 30)
-                print(answer)
-                print("-" * 30)
-                
-                if not success:
-                    print("Failed to get response")
-        
-        elif choice == "2":
-            # Math solver
-            problem = get_input("Math problem: ")
-            if problem and problem.strip():
-                question = f"Solve: {problem.strip()}"
-                answer, success = send_question(question)
-                print()
-                print("Solution:")
-                print("-" * 30)
-                print(answer)
-                print("-" * 30)
-        
-        elif choice == "3":
-            # Quick facts
-            print()
-            print("Quick fact topics:")
-            print("a) Science")
-            print("b) History")
-            print("c) Math")
-            topic = get_input("Choose topic: ")
-            
-            questions = {
-                "a": "Tell me an interesting science fact",
-                "b": "Tell me an interesting history fact", 
-                "c": "Tell me an interesting math fact"
-            }
-            
-            if topic.lower() in questions:
-                answer, success = send_question(questions[topic.lower()])
-                print()
-                print(answer)
-        
-        elif choice == "4":
-            print("Goodbye!")
-            break
-        
-        else:
-            print("Invalid choice")
-        
-        # Pause before next iteration
-        try:
-            input("\nPress ENTER to continue...")
-        except:
-            time.sleep(1)
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nExiting...")
-    except Exception as e:
-        print(f"Error: {e}")
-        try:
-            import traceback
-            traceback.print_exc()
-        except:
-            pass
+def test_connection():
+n    \"\"\"Test basic communication with ESP32-S3\"\"\"\n    print(\"TI-32 Simple Connection Test\")\n    print(\"=\" * 30)\n    \n    # Clear status\n    store_string(\"\", 0)\n    \n    # Send test message\n    test_msg = \"Hello ESP32!\"\n    store_string(test_msg, 1)\n    store_string(\"GO\", 0)\n    \n    print(f\"Sent: {test_msg}\")\n    print(\"Waiting for response...\")\n    \n    # Wait for response\n    max_wait = 10\n    start_time = time.monotonic()\n    \n    while time.monotonic() - start_time < max_wait:\n        status = recall_string(0)\n        \n        if status == \"DONE\":\n            response = recall_string(2)\n            print(f\"\\n✅ Success! Response: {response}\")\n            return True\n        elif status == \"ERROR\":\n            print(\"\\n❌ ESP32 reported an error\")\n            return False\n        \n        time.sleep(0.5)\n        print(\".\", end=\"\")\n    \n    print(\"\\n❌ Timeout - no response from ESP32\")\n    return False\n\ndef test_math_query():\n    \"\"\"Test a simple math query\"\"\"\n    print(\"\\nMath Query Test\")\n    print(\"=\" * 20)\n    \n    # Send math question\n    question = \"What is 2 + 2?\"\n    store_string(question, 1)\n    store_string(\"GO\", 0)\n    \n    print(f\"Question: {question}\")\n    print(\"Waiting for AI response...\")\n    \n    # Wait for response\n    max_wait = 15\n    start_time = time.monotonic()\n    \n    while time.monotonic() - start_time < max_wait:\n        status = recall_string(0)\n        \n        if status == \"DONE\":\n            answer = recall_string(2)\n            print(f\"\\n✅ Answer received: {answer}\")\n            return True\n        elif status == \"ERROR\":\n            print(\"\\n❌ AI server error\")\n            return False\n        \n        time.sleep(0.5)\n        print(\".\", end=\"\")\n    \n    print(\"\\n❌ Timeout waiting for AI response\")\n    return False\n\ndef main():\n    \"\"\"Run connection and math tests\"\"\"\n    print(\"TI-32 ESP32 Connection Test\")\n    print(\"=\" * 35)\n    \n    # Test 1: Basic communication\n    print(\"\\nTest 1: Basic Communication\")\n    conn_ok = test_connection()\n    \n    if conn_ok:\n        # Test 2: Math query (only if basic comm works)\n        print(\"\\nTest 2: Math Query\")\n        math_ok = test_math_query()\n        \n        if math_ok:\n            print(\"\\n🎉 All tests passed! Your TI-32 setup is working correctly.\")\n        else:\n            print(\"\\n⚠️ Basic communication works but AI queries are failing.\")\n            print(\"Check that your AI server is running and accessible.\")\n    else:\n        print(\"\\n❌ Basic communication test failed.\")\n        print(\"\\nTroubleshooting steps:\")\n        print(\"1. Check ESP32 is powered and USB cable is connected\")\n        print(\"2. Verify ESP32 firmware is loaded correctly\")\n        print(\"3. Check that VBUS 5V power is enabled\")\n        print(\"4. Ensure calculator USB port is clean and functional\")\n    \n    print(\"\\nTest complete!\")\n\nif __name__ == \"__main__\":\n    main()
