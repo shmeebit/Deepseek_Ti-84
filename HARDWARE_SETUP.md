@@ -27,7 +27,7 @@ Battery (3.7V LiPo)
 │                       [Control GPIO10] ←─── XIAO ESP32S3 (D16)
 │
 └───────────────────────────────────────────→ Common Ground
-
+- **Insert Better Photo Upon Completion**
 
 ## Connection Details
 
