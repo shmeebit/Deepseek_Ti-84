@@ -1,16 +1,27 @@
 {
+  "name": "ti32-server",
+  "version": "1.0.0",
+  "description": "TI-32 AI Server Bridge for DeepSeek-R1 integration",
+  "main": "index.mjs",
   "type": "module",
   "scripts": {
     "start": "node index.mjs",
-    "dev": "node --watch index.mjs"
+    "dev": "nodemon index.mjs",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
-    "axios": "^1.7.7",
-    "body-parser": "^1.20.3",
+    "express": "^4.18.2",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.21.1",
-    "lodash": "^4.17.21",
-    "morgan": "^1.10.0"
-  }
+    "body-parser": "^1.20.2",
+    "morgan": "^1.10.0",
+    "dotenv": "^16.3.1",
+    "axios": "^1.6.0",
+    "urlencode": "^1.1.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "keywords": ["ti-84", "ai", "deepseek", "esp32", "calculator", "ollama"],
+  "author": "",
+  "license": "GPL-3.0"
 }
