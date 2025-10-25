@@ -8,3 +8,8 @@ Thumbs.db
 
 # Build
 *.log
+
+# KiCad caches and backups
+pcb/**/fp-info-cache/
+pcb/**/*-backups/
+pcb/**/*.kicad_prl

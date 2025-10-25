@@ -1,6 +1,11 @@
 # DeepSeek-TI-84  (calculator ↔ AI)
 A TI-84 Plus CE Python asks DeepSeek-R1 questions over a $7 ESP32-S3 dongle.
 
+Note: WIP clean-up — use these files while we finish repairs
+- ESP32-S3 firmware: esp32s3/esp32s3_host_clean.ino
+- TI-84 program: ti84/ti32_ai_clean.py
+The original files showed merge artifacts; the clean versions above are known-good starting points.
+
 ## 1. What you need to buy (exact parts)
 | Qty | Part | Footprint | Mouser | LCSC | Notes |
 |----:|------|-----------|--------|------|-------|
